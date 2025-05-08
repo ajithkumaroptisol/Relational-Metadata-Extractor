@@ -1,0 +1,4 @@
+pyodbc
+openpyxl
+pandas
+streamlit
