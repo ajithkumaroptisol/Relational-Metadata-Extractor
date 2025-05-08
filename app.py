@@ -49,9 +49,9 @@ def connect_to_db():
     try:
         # Use Windows authentication if username is empty
         if db_username == "":
-            conn_str = f"DRIVER={{SQL Server}};SERVER={db_server};DATABASE={db_name};Trusted_Connection=yes;"
+            conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={db_server};DATABASE={db_name};Trusted_Connection=yes;"
         else:
-            conn_str = f"DRIVER={{SQL Server}};SERVER={db_server};DATABASE={db_name};UID={db_username};PWD={db_password};"
+            conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={db_server};DATABASE={db_name};UID={db_username};PWD={db_password};"
         
         conn = pyodbc.connect(conn_str)
         return conn, "Connected successfully!"
