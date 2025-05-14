@@ -7,6 +7,8 @@ from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Font, Alignment, PatternFill
 from io import BytesIO
+from ERD_Gen import mermaid_to_image
+from PIL import Image
 
 # Set page config
 st.set_page_config(page_title="Database Metadata Explorer", layout="wide")
@@ -43,6 +45,8 @@ if 'search_query' not in st.session_state:
     st.session_state.search_query = ""
 if 'filtered_tables' not in st.session_state:
     st.session_state.filtered_tables = []
+if 'relationships' not in st.session_state:
+    st.session_state.relationships = []
 
 # Function to connect to database
 def connect_to_db():
@@ -291,7 +295,7 @@ def get_function_metadata(conn, func_name):
     
     return metadata
 
-# Function to identify dependencies
+# Function to identify dependencies using the corrected query
 def find_dependencies(conn, table_name):
     cursor = conn.cursor()
     dependencies = {
@@ -301,24 +305,59 @@ def find_dependencies(conn, table_name):
         "functions": []
     }
     
-    # Get related tables through foreign keys
+    # Get related tables through foreign keys - UPDATED with correct query
     cursor.execute(f"""
     SELECT DISTINCT
-        OBJECT_NAME(f.referenced_object_id) as referenced_table
+        fk.name AS ForeignKeyName,
+        OBJECT_SCHEMA_NAME(fkc.parent_object_id) AS ReferencingSchema,
+        tp.name AS ReferencingTable,
+        cp.name AS ReferencingColumn,
+        OBJECT_SCHEMA_NAME(fkc.referenced_object_id) AS ReferencedSchema,
+        tr.name AS ReferencedTable,
+        cr.name AS ReferencedColumn
     FROM 
-        sys.foreign_keys AS f
-        INNER JOIN sys.foreign_key_columns AS fc 
-            ON f.OBJECT_ID = fc.constraint_object_id
-        INNER JOIN sys.tables t 
-            ON t.OBJECT_ID = f.parent_object_id
+        sys.foreign_keys fk
+    JOIN 
+        sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+    JOIN 
+        sys.tables tp ON fkc.parent_object_id = tp.object_id
+    JOIN 
+        sys.columns cp ON fkc.parent_object_id = cp.object_id AND fkc.parent_column_id = cp.column_id
+    JOIN 
+        sys.tables tr ON fkc.referenced_object_id = tr.object_id
+    JOIN 
+        sys.columns cr ON fkc.referenced_object_id = cr.object_id AND fkc.referenced_column_id = cr.column_id
     WHERE 
-        OBJECT_NAME(f.referenced_object_id) = ?
-        OR OBJECT_NAME(f.parent_object_id) = ?
-    """, table_name, table_name)
+        tr.name = ?
+    ORDER BY 
+        ReferencedTable, ReferencingTable
+    """, table_name)
+    
+    # Store relationship data for ERD generation
+    relationships = []
     
     for row in cursor.fetchall():
-        if row[0] != table_name and row[0] not in dependencies["tables"]:
-            dependencies["tables"].append(row[0])
+        fk_name, ref_schema, ref_table, ref_column, refed_schema, refed_table, refed_column = row
+        
+        # Add to relationships list for Mermaid diagram
+        relationships.append({
+            "fk_name": fk_name,
+            "referencing_schema": ref_schema,
+            "referencing_table": ref_table,
+            "referencing_column": ref_column,
+            "referenced_schema": refed_schema,
+            "referenced_table": refed_table,
+            "referenced_column": refed_column
+        })
+        
+        # Add to dependencies
+        if ref_table != table_name and ref_table not in dependencies["tables"]:
+            dependencies["tables"].append(ref_table)
+        if refed_table != table_name and refed_table not in dependencies["tables"]:
+            dependencies["tables"].append(refed_table)
+    
+    # Store relationships in session state
+    st.session_state.relationships = relationships
     
     # Get views that reference the table
     cursor.execute(f"""
@@ -374,6 +413,28 @@ def find_dependencies(conn, table_name):
     
     cursor.close()
     return dependencies
+
+# Function to generate Mermaid ERD
+def generate_mermaid_erd(relationships, selected_table):
+    mermaid_code = ["erDiagram"]
+    
+    # Track added relationships to avoid duplicates
+    added_relationships = set()
+    
+    for rel in relationships:
+        ref_table = rel["referencing_table"]
+        refed_table = rel["referenced_table"]
+        
+        # Create a unique identifier for this relationship
+        rel_key = f"{ref_table}:{refed_table}:{rel['referencing_column']}:{rel['referenced_column']}"
+        
+        if rel_key not in added_relationships:
+            # Add the relationship to the diagram
+            # Format: TableA ||--o{ TableB : "Column relationship"
+            mermaid_code.append(f'    {refed_table} ||--o{{ {ref_table} : "{rel["referenced_column"]}"')
+            added_relationships.add(rel_key)
+    
+    return "\n".join(mermaid_code)
 
 # Function to find similar tables
 def find_similar_tables(tables, selected_table):
@@ -606,49 +667,91 @@ if st.session_state.conn:
             
             # Analyze button
             if st.button("Analyze Database"):
-            # Find dependencies and similar tables
+                # Find dependencies and similar tables
                 with st.spinner("Analyzing dependencies and similar tables..."):
                     st.session_state.dependencies = find_dependencies(st.session_state.conn, selected_table)
                     st.session_state.similar_tables = find_similar_tables(st.session_state.tables, selected_table)
             
             # Display results if analysis has been performed
-        if "dependencies" in st.session_state and st.session_state.dependencies:
-            st.subheader("Dependencies")
-            
-            # Tables
-            if st.session_state.dependencies["tables"]:
-                st.write("**Related Tables:**")
-                st.write(", ".join(st.session_state.dependencies["tables"]))
-            else:
-                st.write("**Related Tables:** None found")
-            
-            # Views
-            if st.session_state.dependencies["views"]:
-                st.write("**Views:**")
-                st.write(", ".join(st.session_state.dependencies["views"]))
-            else:
-                st.write("**Views:** None found")
-            
-            # Procedures
-            if st.session_state.dependencies["procedures"]:
-                st.write("**Stored Procedures:**")
-                st.write(", ".join(st.session_state.dependencies["procedures"]))
-            else:
-                st.write("**Stored Procedures:** None found")
-            
-            # Functions
-            if st.session_state.dependencies["functions"]:
-                st.write("**Functions:**")
-                st.write(", ".join(st.session_state.dependencies["functions"]))
-            else:
-                st.write("**Functions:** None found")
-            
-            # Similar tables
-            st.subheader("Similar Tables")
-            if st.session_state.similar_tables:
-                st.write(", ".join(st.session_state.similar_tables))
-            else:
-                st.write("No similar tables found")
+            if "dependencies" in st.session_state and st.session_state.dependencies:
+                st.subheader("Dependencies")
+                
+                # Tables
+                if st.session_state.dependencies["tables"]:
+                    st.write("**Related Tables:**")
+                    st.write(", ".join(st.session_state.dependencies["tables"]))
+                else:
+                    st.write("**Related Tables:** None found")
+                
+                # Views
+                if st.session_state.dependencies["views"]:
+                    st.write("**Views:**")
+                    st.write(", ".join(st.session_state.dependencies["views"]))
+                else:
+                    st.write("**Views:** None found")
+                
+                # Procedures
+                if st.session_state.dependencies["procedures"]:
+                    st.write("**Stored Procedures:**")
+                    st.write(", ".join(st.session_state.dependencies["procedures"]))
+                else:
+                    st.write("**Stored Procedures:** None found")
+                
+                # Functions
+                if st.session_state.dependencies["functions"]:
+                    st.write("**Functions:**")
+                    st.write(", ".join(st.session_state.dependencies["functions"]))
+                else:
+                    st.write("**Functions:** None found")
+                
+                # Similar tables
+                st.subheader("Similar Tables")
+                if st.session_state.similar_tables:
+                    st.write(", ".join(st.session_state.similar_tables))
+                else:
+                    st.write("No similar tables found")
+                
+                # Display Mermaid ERD diagram if relationships exist
+                if hasattr(st.session_state, 'relationships') and st.session_state.relationships:
+                    st.subheader("Entity Relationship Diagram")
+                    mermaid_code = generate_mermaid_erd(st.session_state.relationships, selected_table)
+                    st.text_area("Mermaid Code for ERD", mermaid_code, height=300)
+                    
+                    # Option to download the Mermaid code
+                    mermaid_file = BytesIO()
+                    mermaid_file.write(mermaid_code.encode('utf-8'))
+                    mermaid_file.seek(0)
+                    
+                    st.download_button(
+                        label="Download Mermaid Code",
+                        data=mermaid_file,
+                        file_name=f"ERD_{selected_table}.mmd",
+                        mime="text/plain"
+                    )
+                    
+                    # # Display the ERD using streamlit-mermaid if available
+                    # try:
+                    #     from streamlit_mermaid import st_mermaid
+                    #     st_mermaid(mermaid_code, height=400)
+                    # except ImportError:
+                    #     st.warning("Install streamlit-mermaid package to render the diagram in the app.")
+                    #     st.markdown("### Preview (If supported by your browser):")
+                    #     st.markdown(f"```mermaid\n{mermaid_code}\n```")
+
+                    # Convert and show image
+                    try:
+                        image = mermaid_to_image(mermaid_code, "er_diagram_white.png")
+                        image_path = "er_diagram_white.png"
+                        image = Image.open(image_path)
+                        st.subheader("ERD Diagram")
+                        st.image(image, caption="Visualized ERD Diagram", use_column_width=True)
+
+                        # PNG download
+                        with open(image_path, "rb") as img_file:
+                            st.download_button("Download ERD Diagram (PNG)", data=img_file, file_name="er_diagram.png", mime="image/png")
+                    except FileNotFoundError as e:
+                        st.error("❌ Failed to generate diagram due to Mermaid syntax error. Please fix the Mermaid code or retry.")
+                        st.code(str(e), language="bash")
         
         # Generate Excel report button - only show if analysis has been done
         if "dependencies" in st.session_state and st.session_state.dependencies:
